@@ -10,20 +10,22 @@
 #define get_u_int64_t(X,O)  (*(uint64_t *)(((uint8_t *)X) + O))
 
 #define MAX_FILES 10 //一个网页的元素个数
-#define MAX_RESPOND_PACK_NUM 500 // 响应包的个数
-#define MAX_REQ_PACK_NUM 500 // 请求包的个数
+#define MAX_RESPOND_PACK_NUM 1000 // 响应包的个数
+#define MAX_REQ_PACK_NUM 1000 // 请求包的个数
+#define MAX_PAYLAOD_LENGTH 5000
 
 typedef struct HttpNode
 {
     u_int ack;
     u_int seq;
     u_int len;
-    char data[5000];
+    char data[10000];
 } HttpLNode;
 
 pcap_t *pcap_handle = NULL;//libpcap handle
 
 char s_website[] = "nic.utsz.edu.cn";
+//char s_website[] = "host.robots.ox.ac.uk:8080";
 static char s_src_addr[20];
 static char s_dst_addr[20];
 static char s_website_IP_addr[20] = { 0 };
@@ -33,6 +35,44 @@ static HttpLNode *httpRespondPktList = new HttpLNode[MAX_RESPOND_PACK_NUM];
 static HttpLNode *httpRequestPktList = new HttpLNode[MAX_REQ_PACK_NUM];
 static int s_http_respond_packet_cnt = 0; // 接收到响应包的个数
 static int s_http_request_packet_cnt = 0; // 接收到请求包的个数
+
+void bin_ins_sort(HttpLNode *list, int start, int end, CMP_KEY key)
+{
+	int i = 0;
+    int j = 0;
+    if (key == CMP_ACK)	// key is Acknowledge
+    {
+        for(i=start;i<end;i++)
+        {
+            for(j=i;j<end;j++)
+            {
+                if(list[j].ack<list[i].ack)
+                {
+                    HttpLNode temp=list[i];
+                    list[i]=list[j];
+                    list[j]=temp;
+
+                }
+            }
+        }
+    }
+    else if(key==CMP_SEQ)	// 按序列号进行排序
+    {
+        for(i=start;i<end;i++)
+        {
+            for(j=i;j<end;j++)
+            {
+                if(list[j].seq<list[i].seq)
+                {
+                        HttpLNode temp=list[i];
+                        list[i]=list[j];
+                        list[j]=temp;
+
+                }
+            }
+        }
+    }
+}
 
 void ethernet_protocol_callback(
     u_char *argument,
@@ -95,7 +135,7 @@ void ethernet_protocol_callback(
         if(flags & 0x01) printf("FIN ");
         if(flags & 0x04) printf("RST ");
         printf("\n");
-        printf("respond length : %d\n", s_http_respond_packet_cnt);
+        printf("respond list length : %d\n", s_http_respond_packet_cnt);
 
         if (strlen(s_website_IP_addr) != 0 && strcmp(s_src_addr, s_website_IP_addr) && (flags & 0x01))//TCP连接是否结束
         {
@@ -108,19 +148,10 @@ void ethernet_protocol_callback(
         offset = 14 + 20 + (tcp_protocol->tcp_offset << 2);
         caplen = packet_header->caplen - offset;
         payload = (char *)packet_content + offset;
+        printf("\t data length: %d\n", caplen);
         
         if(source_port == 80 && 0 != caplen)
         {
-            // printf("\t data length: %d\n", caplen);
-            // for(i=0; i<caplen; i++)
-            // {
-            //     if(get_u_int16_t(payload, i) == ntohs(0x0d0a) &&
-            //         get_u_int16_t(payload, i+4) == ntohs(0x0d0a))
-            //     {
-            //         offset += i+4;
-            //         break;
-            //     } 
-            // }
             for (i = 0; i < s_http_request_packet_cnt; i++)
             {
                 if (httpRequestPktList[i].seq
@@ -131,6 +162,8 @@ void ethernet_protocol_callback(
                     hp.seq = sequence;
                     hp.len = caplen;
                     memcpy(hp.data, payload, caplen);
+                    // printf("***data****\n");
+                    // printf("%s", payload);
                     httpRespondPktList[s_http_respond_packet_cnt++] = hp;//添加节点到响应链表中
                 }
             }
@@ -163,6 +196,10 @@ void ethernet_protocol_callback(
             hp.len = caplen;
             memcpy(hp.data, payload, caplen);
             httpRequestPktList[s_http_request_packet_cnt++] = hp;//添加节点到请求链表中
+            char temp[MAX_PAYLAOD_LENGTH];
+            memset(temp, '\0', MAX_PAYLAOD_LENGTH);
+            memcpy(temp, httpRequestPktList[s_http_request_packet_cnt-1].data, httpRequestPktList[s_http_request_packet_cnt-1].len);
+            printf("%s\n", temp);
         }
     }      
     packet_number++;
@@ -226,29 +263,44 @@ int main()
     if(pcap_handle != NULL)
         pcap_close(pcap_handle);
 
+    bin_ins_sort(httpRespondPktList, 0, s_http_respond_packet_cnt, CMP_SEQ);//按确认号排序响应链表
 
     for(int i=0; i<s_http_respond_packet_cnt; i++)
     {
-        int offset = 0;
+        char *pStart = NULL;
+        int offset;
+        char temp[MAX_PAYLAOD_LENGTH];
         char *payload = httpRespondPktList[i].data;
+
+        if(i > 1 && httpRespondPktList[i].seq == httpRespondPktList[i-1].seq)
+            continue;
+
         if(*payload == 'H' && *(payload+1) == 'T' && *(payload+2) == 'T' && *(payload+3) == 'P')
-            for(int j=0; i<httpRespondPktList[i].len; j++)
+            if(NULL != (pStart = strstr(httpRespondPktList[i].data, "\r\n\r\n")))
             {
-                if(get_u_int16_t(payload, j) == ntohs(0x0d0a) &&
-                    get_u_int16_t(payload, j+4) == ntohs(0x0d0a))
-                {
-                    offset += j+4;
-                    break;
-                } 
-            }
-        char temp[] = "\n************************************************************\n";
+                pStart += 4;
+                break;
+            } 
+        offset = (int)(pStart - httpRespondPktList[i].data);
+        printf(">> file data len: %d\toffset:%d\tlen:%d\n", httpRespondPktList[i].len-offset, offset, httpRespondPktList[i].len);
+        memcpy(temp, httpRespondPktList[i].data+offset, httpRespondPktList[i].len-offset);
+        temp[httpRespondPktList[i].len-offset] = '\0';
         fputs(temp, fp);
-        fputs(httpRespondPktList[i].data+offset, fp);
+        //fwrite(httpRespondPktList[i].data+offset, 1, httpRespondPktList[i].len-offset, fp);
+        printf("%u\n", httpRespondPktList[i].seq);
+    }
+    for(int i=0; i<s_http_request_packet_cnt; i++)
+    {
+        char temp[MAX_PAYLAOD_LENGTH];
+        memset(temp, '\0', MAX_PAYLAOD_LENGTH);
+        memcpy(temp, httpRequestPktList[i].data, httpRequestPktList[i].len);
+        printf("%s\n", temp);
     }
     fclose(fp);
 
     printf("****************************\n");
     printf("respond length : %d\n", s_http_respond_packet_cnt);
+    printf("request length : %d\n", s_http_request_packet_cnt);
 
     return 0;
 }

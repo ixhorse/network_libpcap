@@ -64,3 +64,8 @@ struct tcp_header
 
     u_int16_t tcp_urgent_pointer;
 };
+
+typedef enum
+{
+	CMP_ACK, CMP_SEQ
+} CMP_KEY;
